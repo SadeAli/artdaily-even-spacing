@@ -1110,11 +1110,59 @@
     draw();
   });
 
+  /* A reveal has to be carried across a resize, not left drawn against the
+     old canvas box. The handler below only ever REBUILT the live item, so a
+     reveal was untouched — and the round's closing reveal is kept on screen
+     deliberately, with `playing` already false, so nothing rebuilt it
+     either: rotating a phone there left the pink ghost, the gap numbers and
+     the player's own fill exactly where they were (measured: painted out to
+     x=702 on a 380px sheet — nearly the whole lesson off the page).
+
+     Uniform scale about the sheet's centre. Uniform because the tilted box
+     and the fill's own direction are what item 4 is ABOUT — scaling x and y
+     by different factors would shear the box and quietly redraw the strokes
+     at an angle nobody drew. Scaling about the centre also cannot push
+     anything out: a point within half the old box of the old centre lands
+     within s·(oldW/2) ≤ W/2 of the new one. Pixel readouts (the per-tick
+     ±px chips, the gap sizes) scale with the picture so the numbers still
+     describe the drawing they are printed on. */
+  function rescaleReveal(oldW, oldH) {
+    var rv = revealing, s, ox, oy, nx, ny, it, i, k;
+    if (!rv || !(oldW > 0) || !(oldH > 0)) return;
+    s = Math.min(W / oldW, H / oldH);
+    if (!isFinite(s) || s <= 0) return;
+    ox = oldW / 2; oy = oldH / 2; nx = W / 2; ny = H / 2;
+    function mv(p) {
+      p.x = nx + (p.x - ox) * s;
+      p.y = ny + (p.y - oy) * s;
+    }
+    it = rv.item;
+    if (rv.type === 'ticks') {
+      mv(it.a); mv(it.b);
+      for (i = 0; i < rv.ticks.length; i++) {
+        for (k = 0; k < rv.ticks[i].pts.length; k++) mv(rv.ticks[i].pts[k]);
+      }
+      for (i = 0; i < rv.offsets.length; i++) rv.offsets[i].deltaPx *= s;
+      return;
+    }
+    it.cx = nx + (it.cx - ox) * s;
+    it.cy = ny + (it.cy - oy) * s;
+    it.hw *= s; it.hh *= s;
+    for (i = 0; i < rv.strokes.length; i++) {
+      for (k = 0; k < rv.strokes[i].length; k++) mv(rv.strokes[i][k]);
+    }
+    for (i = 0; i < rv.ev.mids.length; i++) mv(rv.ev.mids[i]);
+    for (i = 0; i < rv.ev.gaps.length; i++) rv.ev.gaps[i] *= s;
+    /* it.ang, ev.meanAng and ghostDir are directions — a uniform scale
+       leaves every one of them exactly as it was */
+  }
+
   window.addEventListener('resize', function () {
-    var prevW = W;
+    var prevW = W, prevH = H;
     fitCanvas();
     /* mobile URL-bar collapses fire resize without a width change —
        only rebuild (and clear in-progress marks) when width moved */
+    if (W !== prevW && revealing) rescaleReveal(prevW, prevH);
     if (W !== prevW && playing && !revealing) {
       /* the baseline/box is re-placed for the new sheet, so any marks already
          on the old one go with it. Say so: the marks used to vanish under the
