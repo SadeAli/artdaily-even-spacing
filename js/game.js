@@ -44,6 +44,15 @@
      it takes the larger-of-two treatment. */
   var PARALLEL_ZERO_DEG = 14;
   var RHYTHM_REL_ZERO = 0.42, RHYTHM_FLOOR_PX = 5;
+  /* The tilted box is the one item that asks for a DIRECTION in words
+     ("running the way the dashed guide runs"), so it is the one item where
+     direction is scored. The free zone is eased — holding an eyeballed axis
+     is motor work — and the falloff is not. */
+  var TILT_FREE_DEG = 7, TILT_ZERO_DEG = 55;
+  /* A fill has to cross the box. An evenly spaced k-stroke fill spans
+     (k−1)/k of it, so full marks land well before edge-to-edge: this is a
+     floor against a scribble crammed into one band, not a demand. */
+  var FILL_SPAN_FRAC = 1.2;   /* × the box's half-extent = full marks */
 
   /* ============================================================
      Pure scoring + geometry — arrays in, numbers out. No DOM.
@@ -241,6 +250,57 @@
       stdDeg: ax.stdDeg,
       drift: gaps.length > 1 ? gaps[gaps.length - 1] - gaps[0] : 0
     };
+  }
+
+  /* Does the fill answer the item it was asked for?
+     hatchEval only ever sees the strokes, so on its own it grades a fill
+     drawn in the far corner of the sheet, or run across the tilted box
+     instead of along its guide, exactly as highly as the obedient one —
+     the drill knows the answer (the reveal draws it) and never scored
+     against it. Three 0–1 multipliers, all pure geometry:
+       inBox   share of stroke midpoints that landed in the box, with a
+               generous margin: an honest stroke overshoots the edges;
+       spread  how far across the box the fill actually reaches, so nine
+               strokes packed into a 50px band is not a filled box;
+       aligned tilted box only: how close the fill's own axis is to the
+               box's short-edge axis, measured axially — a fill is the
+               same fill drawn either way along its direction.
+     Ease widens the angular free zone and nothing else: where the box is
+     is not a question of how steady the hand is. */
+  function fillFit(ev, box, ease) {
+    var e = ease > 0 ? ease : 1;
+    var mids = (ev && ev.mids) || [];
+    var out = { inBox: 1, spread: 1, aligned: 1, offDeg: 0, factor: 1 };
+    if (!box || !mids.length) return out;
+    var u = { x: Math.cos(box.ang), y: Math.sin(box.ang) };
+    var v = { x: -Math.sin(box.ang), y: Math.cos(box.ang) };
+    var slackU = Math.max(0.15 * box.hw, 12), slackV = Math.max(0.15 * box.hh, 12);
+    var n = 0, i, dx, dy;
+    for (i = 0; i < mids.length; i++) {
+      dx = mids[i].x - box.cx; dy = mids[i].y - box.cy;
+      if (Math.abs(dx * u.x + dy * u.y) <= box.hw + slackU &&
+          Math.abs(dx * v.x + dy * v.y) <= box.hh + slackV) n += 1;
+    }
+    out.inBox = n / mids.length;
+
+    /* the fill's own spacing axis, and the box's half-extent along it */
+    var px = -Math.sin(ev.meanAng), py = Math.cos(ev.meanAng);
+    var extent = Math.abs(u.x * px + u.y * py) * box.hw +
+      Math.abs(v.x * px + v.y * py) * box.hh;
+    var span = 0, gaps = ev.gaps || [];
+    for (i = 0; i < gaps.length; i++) span += gaps[i];
+    out.spread = extent > 0 ? clamp01(span / (FILL_SPAN_FRAC * extent)) : 1;
+
+    if (box.rotated) {
+      var d = Math.atan2(v.y, v.x) - ev.meanAng;
+      while (d > Math.PI / 2) d -= Math.PI;
+      while (d < -Math.PI / 2) d += Math.PI;
+      out.offDeg = Math.abs(d) * 180 / Math.PI;
+      out.aligned = clamp01(1 - Math.max(0, out.offDeg - e * TILT_FREE_DEG) / TILT_ZERO_DEG);
+    }
+    var f = out.inBox * out.spread * out.aligned;
+    out.factor = isFinite(f) ? clamp01(f) : 0;
+    return out;
   }
 
   function roundScore(scores) {
@@ -837,7 +897,11 @@
   function scoreHatchItem() {
     var ev = hatchEval(hatchStrokes, easeFactor());
     var ax = hatchAxes(item);
-    itemScores.push(ev.score);
+    /* hatchEval grades the strokes against each other; fillFit grades them
+       against the box they were asked to fill */
+    var fit = fillFit(ev, item, easeFactor());
+    var score = ev.score * fit.factor;
+    itemScores.push(score);
     if (itemScores.length === ITEMS_PER_ROUND) reportRound();
     revealing = {
       type: 'hatch',
@@ -854,7 +918,13 @@
     if (Math.abs(ev.drift) > 6) words = ev.drift > 0 ? ' your gaps widened as you went.' : ' your gaps tightened as you went.';
     else if (ev.rhythm < 60) words = ' your gaps jumped about instead of holding one size.';
     if (ev.parallelism < 60) words += ' your strokes fanned about ' + Math.round(ev.stdDeg) + '° apart in direction.';
-    hint.textContent = itemLabel() + ' — ' + Math.round(ev.score) +
+    /* a score cut by the box, not by the strokes, has to say so — a number
+       that drops for a reason nobody names teaches nothing */
+    if (fit.aligned < 0.98) words += ' your fill ran ' + Math.round(fit.offDeg) +
+      '° off the dashed guide — the pink ghost shows the way it was asked for.';
+    if (fit.spread < 0.9) words += ' it only crossed part of the box.';
+    if (fit.inBox < 0.9) words += ' some strokes landed outside the box.';
+    hint.textContent = itemLabel() + ' — ' + Math.round(score) +
       ' (parallel ' + Math.round(ev.parallelism) + ' · even gaps ' + Math.round(ev.rhythm) +
       '). pink ghost = a perfectly even fill; the numbers are your own gaps.' + words;
     updateTools();
@@ -945,7 +1015,13 @@
 
   ArtDaily.onTheme(draw);
   ArtDaily.onInput(function () {
-    if (playing && !revealing && item) hint.textContent = progressHint();
+    /* Only once there is something to count. This fires from the SDK's
+       capture-phase pointerdown listener, i.e. on the player's very first
+       press — replacing the item's instructions with "0 of 3 ticks" while
+       they are still reading them, before a single mark exists. */
+    if (playing && !revealing && item && (ticks.length || hatchStrokes.length)) {
+      hint.textContent = progressHint();
+    }
     updateTools();
     draw();
   });
