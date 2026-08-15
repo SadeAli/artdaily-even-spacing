@@ -133,6 +133,60 @@
     return out;
   }
 
+  /* The n+1 gaps the ticks actually made, in px, END GAPS INCLUDED —
+     A-to-first and last-to-B are gaps the player chose too, and leaving
+     them out is how "even" quietly stops meaning even. */
+  function tickGaps(fracs, n, segLen) {
+    if (!n || fracs.length < n || !(segLen > 0)) return [];
+    var sorted = fracs.slice().sort(function (x, y) { return x - y; });
+    var out = [], i, prev = 0;
+    for (i = 0; i < n; i++) { out.push((sorted[i] - prev) * segLen); prev = sorted[i]; }
+    out.push((1 - prev) * segLen);
+    return out;
+  }
+
+  /* The gaps re-ordered the way the player WORKED. tickGaps walks the
+     baseline from dot A to dot B, which is a fixed direction on the page
+     and has nothing to do with the hand: a player who ticks from B back
+     toward A widening as they go would be told they tightened. `fracs` is
+     in placement order, so its own ends say which way they travelled. */
+  function gapsInDrawnOrder(gaps, fracs) {
+    if (!gaps || gaps.length < 2 || !fracs || fracs.length < 2) return gaps || [];
+    return fracs[fracs.length - 1] < fracs[0] ? gaps.slice().reverse() : gaps;
+  }
+
+  /* The same delta the pink ticks show, in words. The hatch items have
+     said this since day one ("your gaps widened as you went"); the tick
+     items shipped a score and a row of ±px numbers and left the player to
+     spot the pattern themselves.
+
+     `errPx` and `freePx` are the very numbers tickScore is computed from,
+     so the sentence can never contradict the number printed beside it:
+     inside the free zone the drill has ALREADY declared the spacing even,
+     and "100. your gaps jumped about" is the drill arguing with itself. */
+  function tickWords(gaps, ease, errPx, freePx) {
+    if (!gaps || gaps.length < 2) return '';
+    var e = ease > 0 ? ease : 1;
+    var m = mean(gaps), sd = stdev(gaps);
+    if (!isFinite(m) || !isFinite(sd)) return '';
+    if (isFinite(errPx) && isFinite(freePx) && errPx <= freePx) return 'your gaps were even';
+    var tol = Math.max(0.06 * m, e * 3);
+    if (sd <= tol) return 'your gaps were even';
+    /* "widened as you went" is a claim about a TREND, so check every step,
+       not just the ends: 40, 150, 20, 190 ends far wider than it starts and
+       is nothing like a widening rhythm — it is gaps jumping about. */
+    var up = true, down = true, i, step;
+    for (i = 1; i < gaps.length; i++) {
+      step = gaps[i] - gaps[i - 1];
+      if (step < -tol) up = false;
+      if (step > tol) down = false;
+    }
+    var drift = gaps[gaps.length - 1] - gaps[0];
+    if (up && drift > 2 * tol) return 'your gaps widened as you went';
+    if (down && drift < -2 * tol) return 'your gaps tightened as you went';
+    return 'your gaps jumped about instead of holding one size';
+  }
+
   /* --- segment geometry shared by tick registration --- */
   /* Fraction along a→b where segment p1→p2 crosses it, else null. */
   function segCrossT(p1, p2, a, b) {
@@ -222,6 +276,19 @@
     var ax = axialStats(dirs);
     var parallelism = dirs.length ? 100 * clamp01(1 - ax.stdDeg / (e * PARALLEL_ZERO_DEG)) : 0;
     var px = -Math.sin(ax.meanAng), py = Math.cos(ax.meanAng);
+    /* Point the spacing axis the way the player WORKED, first stroke to
+       last. Its raw direction comes out of an atan2 on a doubled angle, so
+       a fill two degrees off vertical flips it: the very same widening fill
+       was told "your gaps widened as you went" or "…tightened as you went"
+       depending on a wobble nobody could see. Orientation cannot touch a
+       score — the gaps are sorted, so they stay positive and their mean and
+       spread are identical either way — it only decides which end of the
+       fill the sentence calls the start. */
+    if (mids.length > 1) {
+      var d0 = (mids[mids.length - 1].x - mids[0].x) * px +
+        (mids[mids.length - 1].y - mids[0].y) * py;
+      if (d0 < 0) { px = -px; py = -py; }
+    }
     var ts = [], order = [];
     for (i = 0; i < mids.length; i++) {
       ts.push(mids[i].x * px + mids[i].y * py);
@@ -366,6 +433,7 @@
   var lastPenAt = -1e9;
   var revealing = null, revealTimer = null;
   var teaching = false, teachTimer = null;
+  var lastWords = '';  /* the last scored item, in words, for the round-done line */
 
   function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
 
@@ -474,6 +542,7 @@
     itemIdx = 0;
     itemScores = [];
     revealing = null;
+    lastWords = '';
     playing = true;
     item = makeItem(0);
     resetItemMarks();
@@ -886,8 +955,14 @@
       ticks: ticks,
       offsets: tickOffsets(fracs, item.n, segLen)
     };
+    var words = tickWords(
+      gapsInDrawnOrder(tickGaps(fracs, item.n, segLen), fracs), easeFactor(),
+      tickErrorPx(fracs, item.n, segLen),
+      tickTolerancePx(item.n, segLen, easeFactor()).free);
+    lastWords = itemLabel() + ': ' + Math.round(sc) + (words ? ' — ' + words + '.' : '.');
     hint.textContent = itemLabel() + ' — ' + Math.round(sc) +
-      '. pink ticks = perfectly even spacing; the numbers are how far off each of yours landed, in px.';
+      (words ? '. ' + words + '.' : '.') +
+      ' pink ticks = perfectly even spacing; the numbers are how far off each of yours landed, in px.';
     updateTools();
     draw();
     clearTimeout(revealTimer);
@@ -924,6 +999,8 @@
       '° off the dashed guide — the pink ghost shows the way it was asked for.';
     if (fit.spread < 0.9) words += ' it only crossed part of the box.';
     if (fit.inBox < 0.9) words += ' some strokes landed outside the box.';
+    lastWords = itemLabel() + ': ' + Math.round(score) +
+      (words ? ' —' + words : ' — the gaps held one size.');
     hint.textContent = itemLabel() + ' — ' + Math.round(score) +
       ' (parallel ' + Math.round(ev.parallelism) + ' · even gaps ' + Math.round(ev.rhythm) +
       '). pink ghost = a perfectly even fill; the numbers are your own gaps.' + words;
@@ -994,7 +1071,8 @@
     item = null;
     updateTools();
     draw();   /* `revealing` is still set, so the last item stays up to study */
-    hint.textContent = 'round done — the last item stays up to study. press "new round" to go again.';
+    hint.textContent = 'round done — ' + (lastWords ? lastWords + ' ' : '') +
+      'the last item stays up to study. press "new round" to go again.';
   }
 
   var toastTimer = null;
