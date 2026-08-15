@@ -958,17 +958,23 @@
 
   function nextItem() {
     if (!revealing) return;
-    revealing = null;
-    itemIdx += 1;
-    if (itemIdx < ITEMS_PER_ROUND) {
-      item = makeItem(itemIdx);
-      resetItemMarks();
-      hint.textContent = introHint();
-      updateTools();
-      draw();
+    if (itemIdx + 1 >= ITEMS_PER_ROUND) {
+      /* The round's last reveal STAYS on the sheet, exactly as it does in
+         every sibling drill. Clearing `revealing` here blanked the canvas the
+         instant the round ended — the pink ghost, the gap numbers and the
+         player's own fill all vanished a second after the score appeared,
+         so the one item they most wanted to compare was the one they never
+         got to look at. */
+      finishRound();
       return;
     }
-    finishRound();
+    revealing = null;
+    itemIdx += 1;
+    item = makeItem(itemIdx);
+    resetItemMarks();
+    hint.textContent = introHint();
+    updateTools();
+    draw();
   }
 
   /* The round is complete the instant its fourth item is scored —
@@ -987,8 +993,8 @@
     playing = false;
     item = null;
     updateTools();
-    draw();
-    hint.textContent = 'round done — press "new round" to go again.';
+    draw();   /* `revealing` is still set, so the last item stays up to study */
+    hint.textContent = 'round done — the last item stays up to study. press "new round" to go again.';
   }
 
   var toastTimer = null;
@@ -1032,10 +1038,15 @@
     /* mobile URL-bar collapses fire resize without a width change —
        only rebuild (and clear in-progress marks) when width moved */
     if (W !== prevW && playing && !revealing) {
+      /* the baseline/box is re-placed for the new sheet, so any marks already
+         on the old one go with it. Say so: the marks used to vanish under the
+         plain opening instructions, which reads as the drill losing your work
+         rather than the screen having changed. */
+      var hadMarks = ticks.length > 0 || hatchStrokes.length > 0;
       abortStroke();
       item = makeItem(itemIdx);
       resetItemMarks();
-      hint.textContent = introHint();
+      hint.textContent = (hadMarks ? 'the screen changed size — fresh item, no penalty. ' : '') + introHint();
       updateTools();
     }
     draw();
