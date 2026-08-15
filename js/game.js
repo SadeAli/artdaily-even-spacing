@@ -1,11 +1,22 @@
 /* ============================================================
-   game.js — Even Spacing: the divide-and-hatch drill. Four items
+   game.js — Even Spacing: the divide-and-fill drill. Four items
    per round: two baselines to split with evenly spaced ticks
-   (3, then 5), then two rectangles to fill with 8–12 even
-   parallel hatch strokes — the last box tilted ~30° and hatched
-   parallel to its short edge. Scoring is pure interval geometry;
-   the functions at the top take plain arrays and return 0–100
-   (no canvas, no DOM) so they are unit-testable as-is.
+   (3, then 5), then two rectangles to fill with even parallel
+   strokes — the last box tilted ~30° and filled parallel to its
+   short edge. Scoring is pure interval geometry; the functions at
+   the top take plain arrays and return 0–100 (no canvas, no DOM)
+   so they are unit-testable as-is.
+
+   Hardware fairness (protocol v1 input profile):
+     · every tolerance is the LARGER of the drill's own standard
+       (relative to the gap it is judging) and what a hand on this
+       hardware can physically hit (absolute px, ArtDaily.ease()d).
+       A phone's 5-tick item used to demand 14px placement accuracy
+       from a fingertip wider than the error band;
+     · the box and the number of strokes asked for scale with the
+       canvas, so a phone is never asked for 12 strokes at 17px apart;
+     · nothing is ever committed without the player pressing done, so
+       a mark placed under an occluding finger can still be undone.
    ============================================================ */
 (function () {
   'use strict';
@@ -13,14 +24,31 @@
   var SLUG = 'even-spacing';
   var ITEMS_PER_ROUND = 4;
   var TICK_MIN_PATH = 8;     /* px of drawn path — shorter is a stray tap */
-  var TICK_NEAR_PX = 44;     /* a tick must pass this close to the baseline */
-  var HATCH_MIN_PATH = 30;   /* px — shorter hatch strokes are ignored */
-  var HATCH_MIN_STROKES = 6; /* "done" unlocks here; the ask is 8–12 */
+  var TICK_NEAR_BASE = 44;   /* how close a tick must pass to the baseline */
+  var HATCH_MIN_PATH = 30;   /* px — shorter strokes cannot be read as fills */
   var REVEAL_TICKS_MS = 1800;
   var REVEAL_HATCH_MS = 2400;
+  var TEACH_MS = 1200;       /* the one-time "this is what evenly means" flash */
+  var PEN_LOCKOUT_MS = 700;
+
+  /* Tick placement band, in pixels of mean error. It used to be a pure
+     fraction of one gap: on a 213px phone baseline the 5-tick item asked
+     for 14px accuracy under a 30–45px fingertip, while the desktop got
+     20.6px on the same item and 31px on the 3-tick one. */
+  var TICK_REL_FREE = 0.04, TICK_FREE_FLOOR_PX = 3;
+  var TICK_REL_ZERO = 0.40, TICK_ZERO_FLOOR_PX = 16;
+  /* Fill quality: angular spread of the stroke directions, and the
+     evenness of the gaps between them. Parallelism is the one genuinely
+     MOTOR term in the drill — holding a straight repeated drag is what a
+     mouse is worst at — so it is eased outright. Rhythm is placement, so
+     it takes the larger-of-two treatment. */
+  var PARALLEL_ZERO_DEG = 14;
+  var RHYTHM_REL_ZERO = 0.42, RHYTHM_FLOOR_PX = 5;
 
   /* ============================================================
      Pure scoring + geometry — arrays in, numbers out. No DOM.
+     `ease` is the multiplier from ArtDaily.ease(1): 1 pen, 2
+     mouse/trackpad, 1.5 finger.
      ============================================================ */
   function clamp01(v) { return Math.max(0, Math.min(1, v)); }
 
@@ -56,28 +84,40 @@
     return out;
   }
 
-  /* Mean |actual − ideal| in gap units (one gap = 1/(N+1) of the
-     segment); actual fractions are sorted and paired with the sorted
-     ideals, so tick order never matters. */
-  function tickError(fracs, n) {
-    if (!n || fracs.length < n) return 1; /* degenerate: a full gap off */
+  /* Mean |actual − ideal| in PIXELS along the baseline; actual fractions
+     are sorted and paired with the sorted ideals, so tick order never
+     matters. Returns Infinity when there are not enough ticks to judge. */
+  function tickErrorPx(fracs, n, segLen) {
+    if (!n || fracs.length < n || !(segLen > 0)) return Infinity;
     var sorted = fracs.slice().sort(function (x, y) { return x - y; });
     var ideal = idealFractions(n);
     var s = 0, i;
-    for (i = 0; i < n; i++) s += Math.abs(sorted[i] - ideal[i]);
-    return (s / n) * (n + 1);
+    for (i = 0; i < n; i++) s += Math.abs(sorted[i] - ideal[i]) * segLen;
+    return s / n;
   }
 
-  /* Off by 40% of a gap on average scores zero; dead-on scores 100. */
-  function tickScore(fracs, n) {
-    return 100 * clamp01(1 - tickError(fracs, n) / 0.40);
+  function tickTolerancePx(n, segLen, ease) {
+    var e = ease > 0 ? ease : 1;
+    var gap = (n > 0 && segLen > 0) ? segLen / (n + 1) : 0;
+    return {
+      free: Math.max(TICK_REL_FREE * gap, TICK_FREE_FLOOR_PX),
+      zero: Math.max(TICK_REL_ZERO * gap, e * TICK_ZERO_FLOOR_PX),
+    };
+  }
+
+  function tickScore(fracs, n, segLen, ease) {
+    var err = tickErrorPx(fracs, n, segLen);
+    if (!isFinite(err)) return 0;
+    var t = tickTolerancePx(n, segLen, ease);
+    if (t.zero <= t.free) return err <= t.free ? 100 : 0;
+    return 100 * clamp01(1 - (err - t.free) / (t.zero - t.free));
   }
 
   /* Per-tick signed offsets (px toward B) for the reveal. */
   function tickOffsets(fracs, n, segLen) {
     var sorted = fracs.slice().sort(function (x, y) { return x - y; });
     var out = [], i, ideal;
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n && i < sorted.length; i++) {
       ideal = (i + 1) / (n + 1);
       out.push({ ideal: ideal, deltaPx: (sorted[i] - ideal) * segLen });
     }
@@ -123,7 +163,7 @@
     return best ? { t: best.t, near: bd } : null;
   }
 
-  /* --- hatch: parallelism + rhythm --- */
+  /* --- fills: parallelism + rhythm --- */
   /* Least-squares (PCA) direction of a point cloud, as a unit vector. */
   function fitDirection(pts) {
     var n = pts.length, i, mx = 0, my = 0;
@@ -157,19 +197,21 @@
     return { meanAng: meanAng, stdDeg: stdDeg };
   }
 
-  /* Full hatch evaluation. parallelism: angular spread of the stroke
-     directions (14° RMS scores zero). rhythm: coefficient of variation
-     of the gaps between stroke midpoints projected across the mean
-     direction (CV of 0.42 scores zero). Score leans on rhythm — this
-     is a spacing drill. */
-  function hatchEval(strokes) {
+  /* Full fill evaluation. parallelism: angular spread of the stroke
+     directions (eased — this is the motor term). rhythm: how far the
+     gaps between stroke midpoints wander from their own average, in
+     pixels, against the larger of 42% of that average and the hand's
+     own slop. Score leans on rhythm — this is a spacing drill. */
+  function hatchEval(strokes, ease) {
+    var e = ease > 0 ? ease : 1;
     var dirs = [], mids = [], i;
     for (i = 0; i < strokes.length; i++) {
+      if (strokes[i].length < 2) continue;
       dirs.push(fitDirection(strokes[i]));
       mids.push(centroid(strokes[i]));
     }
     var ax = axialStats(dirs);
-    var parallelism = 100 * clamp01(1 - ax.stdDeg / 14);
+    var parallelism = dirs.length ? 100 * clamp01(1 - ax.stdDeg / (e * PARALLEL_ZERO_DEG)) : 0;
     var px = -Math.sin(ax.meanAng), py = Math.cos(ax.meanAng);
     var ts = [], order = [];
     for (i = 0; i < mids.length; i++) {
@@ -180,20 +222,31 @@
     var gaps = [];
     for (i = 1; i < order.length; i++) gaps.push(ts[order[i]] - ts[order[i - 1]]);
     var m = mean(gaps);
-    var cv = m > 1e-6 ? stdev(gaps) / m : Infinity;
-    var rhythm = isFinite(cv) ? 100 * clamp01(1 - cv / 0.42) : 0;
+    var sd = stdev(gaps);
+    /* strokes redrawn on top of one another are one mark, not a fill —
+       "perfectly parallel" is meaningless there, so it earns nothing */
+    var spread = gaps.length > 0 && m > e * RHYTHM_FLOOR_PX;
+    if (!spread) parallelism = 0;
+    var zeroSd = Math.max(RHYTHM_REL_ZERO * m, e * RHYTHM_FLOOR_PX);
+    var rhythm = (spread && zeroSd > 0) ? 100 * clamp01(1 - sd / zeroSd) : 0;
+    var score = 0.35 * parallelism + 0.65 * rhythm;
     return {
-      score: 0.35 * parallelism + 0.65 * rhythm,
-      parallelism: parallelism,
-      rhythm: rhythm,
+      score: isFinite(score) ? score : 0,
+      parallelism: isFinite(parallelism) ? parallelism : 0,
+      rhythm: isFinite(rhythm) ? rhythm : 0,
       meanAng: ax.meanAng,
       mids: mids,
       order: order,
-      gaps: gaps
+      gaps: gaps,
+      stdDeg: ax.stdDeg,
+      drift: gaps.length > 1 ? gaps[gaps.length - 1] - gaps[0] : 0
     };
   }
 
-  function roundScore(scores) { return mean(scores); }
+  function roundScore(scores) {
+    var v = mean(scores);
+    return isFinite(v) ? v : 0;
+  }
 
   /* ============================================================
      Canvas / DOM from here down.
@@ -217,7 +270,10 @@
       ink: cs.getPropertyValue('--ink').trim(),
       muted: cs.getPropertyValue('--muted').trim(),
       card: cs.getPropertyValue('--card').trim(),
-      accent: cs.getPropertyValue('--game-accent').trim() || cs.getPropertyValue('--bubblegum').trim()
+      /* --canvas-accent: AA-safe pink for marks on paper (style.css, below
+         the game marker); falls back to the plain accent. */
+      accent: cs.getPropertyValue('--canvas-accent').trim() ||
+        cs.getPropertyValue('--game-accent').trim() || cs.getPropertyValue('--bubblegum').trim()
     };
   }
 
@@ -226,7 +282,7 @@
   function fitCanvas() {
     var rect = canvas.getBoundingClientRect();
     W = Math.max(1, Math.round(rect.width));
-    H = Math.round(W * 0.62);
+    H = Math.round(W * (W < 520 ? 0.78 : 0.62));
     var dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
@@ -234,11 +290,22 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
+  function narrow() { return W < 460; }
+  function easeFactor() { return ArtDaily.ease(1); }
+  /* how close a tick has to pass to count — the SDK widens it most for a
+     screenless tablet, whose hand is out of sight when it lands */
+  function tickNear() { return ArtDaily.startRadius(TICK_NEAR_BASE); }
+  /* the ask scales with the sheet: 8–12 strokes across a 206px phone box
+     is 17px gaps, narrower than the finger placing them */
+  function fillAsk() { return narrow() ? { lo: 5, hi: 7, min: 4 } : { lo: 8, hi: 12, min: 6 }; }
+
   /* ---- round state ---- */
   var round = 0, itemIdx = 0, itemScores = [], item = null, playing = false;
   var ticks = [], hatchStrokes = [];
-  var drawing = false, stroke = [], activePid = null;
+  var drawing = false, stroke = [], activePid = null, activeType = null;
+  var lastPenAt = -1e9;
   var revealing = null, revealTimer = null;
+  var teaching = false, teachTimer = null;
 
   function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
 
@@ -260,13 +327,16 @@
     return { type: 'ticks', n: n, a: { x: mx - hx, y: my - hy }, b: { x: mx + hx, y: my + hy } };
   }
 
-  /* Items 3–4: a rectangle — the fourth tilted ~30°, hatched parallel
-     to its short edge. Scaled + centered so it always fits. */
+  /* Items 3–4: a rectangle — the fourth tilted ~30°, filled parallel to
+     its short edge. Scaled + centered so it always fits; on a narrow
+     sheet the box takes more of the page, because the gaps inside it are
+     what the player is being asked to see. */
   function makeHatchItem(rotated) {
     var m = 16;
+    var wide = narrow();
     var ang = rotated ? rand(25, 35) * Math.PI / 180 * (Math.random() < 0.5 ? -1 : 1) : 0;
-    var hw = (rotated ? 0.27 : 0.31) * W;
-    var hh = (rotated ? 0.22 : 0.27) * H;
+    var hw = (wide ? 0.40 : (rotated ? 0.27 : 0.31)) * W;
+    var hh = (wide ? 0.30 : (rotated ? 0.22 : 0.27)) * H;
     var cu = Math.abs(Math.cos(ang)), su = Math.abs(Math.sin(ang));
     var ex = hw * cu + hh * su, ey = hw * su + hh * cu;
     var s = Math.min(1, (W / 2 - m) / ex, (H / 2 - m) / ey);
@@ -287,34 +357,54 @@
     hatchStrokes = [];
     stroke = [];
     drawing = false;
+    activePid = null;
+    activeType = null;
+    teaching = false;
+    clearTimeout(teachTimer);
   }
 
   function introHint() {
+    var ask = fillAsk();
     if (item.type === 'ticks') {
-      return itemLabel() + ' — cross the line with ' + item.n + ' short ticks, spaced evenly.';
+      return itemLabel() + ' — cross the line with ' + item.n +
+        ' short ticks, the same distance apart, then press done.';
     }
     return item.rotated
-      ? itemLabel() + ' — tilted box: hatch parallel to its SHORT edge (dashed guide), 8–12 even strokes, then done.'
-      : itemLabel() + ' — hatch the box with 8–12 even parallel strokes, then press done.';
+      ? itemLabel() + ' — tilted box: fill it with ' + ask.lo + '–' + ask.hi +
+        ' evenly spaced parallel strokes, running the way the dashed guide runs, then press done.'
+      : itemLabel() + ' — fill the box with ' + ask.lo + '–' + ask.hi +
+        ' evenly spaced parallel strokes, like the dashed guide, then press done.';
   }
 
   function progressHint() {
+    var ask = fillAsk();
     if (item.type === 'ticks') {
+      if (ticks.length >= item.n) {
+        return itemLabel() + ' — all ' + item.n + ' ticks placed. press done, or undo ↶ to move one.';
+      }
       return itemLabel() + ' — ' + ticks.length + ' of ' + item.n + ' ticks.';
     }
     var n = hatchStrokes.length;
     return itemLabel() + ' — ' + n + ' stroke' + (n === 1 ? '' : 's') +
-      (n < HATCH_MIN_STROKES
-        ? ' (done unlocks at ' + HATCH_MIN_STROKES + ').'
-        : ' — press done when the beat feels even.');
+      (n < ask.min
+        ? ' (done unlocks at ' + ask.min + ').'
+        : ' — press done when the gaps look even.');
   }
 
   function updateTools() {
-    var hatching = playing && !revealing && item && item.type === 'hatch';
-    btnDone.hidden = !hatching;
-    btnDone.disabled = !hatching || hatchStrokes.length < HATCH_MIN_STROKES;
-    var marks = 0;
-    if (playing && !revealing && item) marks = item.type === 'ticks' ? ticks.length : hatchStrokes.length;
+    var live = playing && !revealing && item;
+    var ask = fillAsk();
+    var ready = false, marks = 0;
+    if (live) {
+      marks = item.type === 'ticks' ? ticks.length : hatchStrokes.length;
+      ready = item.type === 'ticks' ? marks >= item.n : marks >= ask.min;
+    }
+    /* always on the page now, so nothing about the drill commits itself:
+       the ticks items used to score the instant the n-th tick landed */
+    btnDone.hidden = false;
+    btnDone.disabled = !ready;
+    btnDone.title = ready ? 'score this item'
+      : (live && item.type === 'ticks' ? 'place all ' + item.n + ' ticks first' : 'draw a few more strokes first');
     btnUndo.disabled = marks === 0;
   }
 
@@ -394,6 +484,29 @@
     ctx.restore();
   }
 
+  /* Shown once, on the very first item of a first round, for about a
+     second after the first tick lands: where the ticks WOULD go if they
+     were even. "Evenly" is the whole idea of the drill and nothing on
+     the page had ever shown it. */
+  function drawTeachGhost(c, it) {
+    var ideal = idealFractions(it.n), i, p, dxl = it.b.x - it.a.x, dyl = it.b.y - it.a.y;
+    var len = Math.hypot(dxl, dyl) || 1;
+    var nx = -dyl / len, ny = dxl / len;
+    ctx.save();
+    ctx.globalAlpha = 0.85;   /* 3.9:1 paper / 5.4:1 night — it is a lesson, not decoration */
+    ctx.strokeStyle = c.accent;
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([4, 4]);
+    for (i = 0; i < ideal.length; i++) {
+      p = { x: it.a.x + dxl * ideal[i], y: it.a.y + dyl * ideal[i] };
+      ctx.beginPath();
+      ctx.moveTo(p.x - nx * 12, p.y - ny * 12);
+      ctx.lineTo(p.x + nx * 12, p.y + ny * 12);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   function hatchAxes(it) {
     return {
       u: { x: Math.cos(it.ang), y: Math.sin(it.ang) },
@@ -414,13 +527,14 @@
     ctx.stroke();
   }
 
-  /* Dashed accent sample stroke near the box's left end — "make
-     strokes like this" for a first-time player. */
+  /* Dashed sample stroke near the box's left end — "make strokes like
+     this" for a first-time player, and on the tilted box it is also the
+     answer to "which edge is the short one". */
   function drawHatchGuide(c, it) {
     var ax = hatchAxes(it), u = ax.u, v = ax.v;
     var gx = it.cx - u.x * it.hw * 0.76, gy = it.cy - u.y * it.hw * 0.76;
     ctx.save();
-    ctx.globalAlpha = 0.65;
+    ctx.globalAlpha = 0.85;   /* the guide answers "which edge is short" — keep it readable */
     ctx.setLineDash([6, 6]);
     ctx.strokeStyle = c.accent;
     ctx.lineWidth = 2;
@@ -474,7 +588,7 @@
   function drawTicksReveal(c, r) {
     drawBaseline(c, r.item, true);
     var dxl = r.item.b.x - r.item.a.x, dyl = r.item.b.y - r.item.a.y;
-    var len = Math.hypot(dxl, dyl);
+    var len = Math.hypot(dxl, dyl) || 1;
     var nx = -dyl / len, ny = dxl / len;
     var i, p, off, txt;
     /* the player's ink */
@@ -501,11 +615,12 @@
 
   function drawHatchReveal(c, r) {
     drawHatchRect(c, r.item, true);
+    var ask = fillAsk();
     var i, g, m1, m2;
     /* ideal evenly spaced ghost in accent */
-    var lines = ghostLines(r.item, r.ghostDir, Math.min(12, Math.max(8, r.strokes.length)));
+    var lines = ghostLines(r.item, r.ghostDir, Math.min(ask.hi, Math.max(ask.lo, r.strokes.length)));
     ctx.save();
-    ctx.globalAlpha = 0.7;
+    ctx.globalAlpha = 0.85;
     ctx.strokeStyle = c.accent;
     ctx.lineWidth = 2;
     for (i = 0; i < lines.length; i++) {
@@ -543,6 +658,7 @@
 
     if (item.type === 'ticks') {
       drawBaseline(c, item, false);
+      if (teaching) drawTeachGhost(c, item);
       drawTickMarks(c, item, 1);
     } else {
       drawHatchRect(c, item, false);
@@ -559,35 +675,74 @@
   }
 
   /* ============================================================
-     Input — free strokes anywhere on the canvas, one pointer at
-     a time (pointerId-guarded so a stray second finger is inert).
+     Input — free strokes anywhere on the canvas, one pointer at a
+     time, with a pen outranking a palm that landed first.
      ============================================================ */
   function pointerPos(ev) {
     var rect = canvas.getBoundingClientRect();
     return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
   }
 
+  function penWins(ev) {
+    /* only a FINGER ever waits, and only while the pen is still talking;
+       a mouse or an unknown pointer type is always allowed to draw */
+    if (ev.pointerType !== 'touch') return true;
+    return (ev.timeStamp || 0) - lastPenAt >= PEN_LOCKOUT_MS;
+  }
+
+  function abortStroke() {
+    if (activePid !== null) {
+      try { canvas.releasePointerCapture(activePid); } catch (e) {}
+    }
+    drawing = false;
+    activePid = null;
+    activeType = null;
+    stroke = [];
+  }
+
   canvas.addEventListener('pointerdown', function (ev) {
-    if (!playing || revealing || drawing || !item) return;
+    if (ev.pointerType === 'pen') lastPenAt = ev.timeStamp || 0;
+    if (!playing || revealing || !item) return;
+    if (drawing) {
+      if (ev.pointerType === 'pen' && activeType !== 'pen') abortStroke();
+      else return;
+    }
+    if (!penWins(ev)) return;
+    if (item.type === 'ticks' && ticks.length >= item.n) {
+      hint.textContent = itemLabel() + ' — that is all ' + item.n +
+        ' ticks. press done to score, or undo ↶ to move one.';
+      return;
+    }
     ev.preventDefault();
     drawing = true;
     activePid = ev.pointerId;
+    activeType = ev.pointerType;
     stroke = [pointerPos(ev)];
     try { canvas.setPointerCapture(ev.pointerId); } catch (e) {}
     draw();
   });
 
   canvas.addEventListener('pointermove', function (ev) {
+    if (ev.pointerType === 'pen') lastPenAt = ev.timeStamp || 0;
     if (!drawing || ev.pointerId !== activePid) return;
     ev.preventDefault();
-    stroke.push(pointerPos(ev));
+    /* coalesced events: a fast fill stroke keeps every sample, and
+       fitDirection is only as good as the samples that survive */
+    var evs = ev.getCoalescedEvents ? ev.getCoalescedEvents() : null;
+    if (evs && evs.length) {
+      for (var i = 0; i < evs.length; i++) stroke.push(pointerPos(evs[i]));
+    } else {
+      stroke.push(pointerPos(ev));
+    }
     draw();
   });
 
   function endStroke(ev) {
     if (!drawing || ev.pointerId !== activePid) return;
-    ev.preventDefault();
+    if (ev.cancelable) ev.preventDefault();
     drawing = false;
+    activePid = null;
+    activeType = null;
     var pts = stroke;
     stroke = [];
     /* a second finger may have pressed done / new round mid-stroke —
@@ -599,41 +754,53 @@
   canvas.addEventListener('pointerup', endStroke);
   /* fallback if pointer capture failed and the release lands off-canvas */
   window.addEventListener('pointerup', endStroke);
+  /* iOS drops capture without a pointerup — treat it as the lift it is */
+  canvas.addEventListener('lostpointercapture', endStroke);
 
-  canvas.addEventListener('pointercancel', function (ev) {
+  function cancelStroke(ev) {
     /* interrupted stroke (system gesture etc.) — reset, no penalty */
     if (!drawing || ev.pointerId !== activePid) return;
-    drawing = false;
-    stroke = [];
-    if (playing && !revealing) hint.textContent = progressHint();
+    abortStroke();
+    if (playing && !revealing && item) hint.textContent = progressHint();
     draw();
-  });
+  }
+  canvas.addEventListener('pointercancel', cancelStroke);
+  window.addEventListener('pointercancel', cancelStroke);
 
   function registerTick(pts) {
     if (pts.length < 2 || pathLength(pts) < TICK_MIN_PATH) {
-      /* stray tap — no penalty, no tick */
+      /* a press with no pull — no penalty, no tick, and say so, because
+         a mark that silently fails to appear reads as a broken page */
+      hint.textContent = itemLabel() + ' — that was a press, not a tick. draw a short line across the baseline.';
       draw();
       return;
     }
     var hit = strokeCrossing(pts, item.a, item.b);
-    if (!hit || hit.near > TICK_NEAR_PX) {
-      hint.textContent = itemLabel() + ' — make your tick cross the line.';
+    if (!hit || hit.near > tickNear()) {
+      hint.textContent = itemLabel() + ' — that mark was too far from the line; draw your tick across it.';
       draw();
       return;
     }
     ticks.push({ t: hit.t, pts: pts });
-    if (ticks.length < item.n) {
+    /* one-time lesson: after the first tick of a first round, show where
+       even ticks would sit. Nothing else on the page ever showed it. */
+    if (round === 1 && itemIdx === 0 && ticks.length === 1) {
+      teaching = true;
+      clearTimeout(teachTimer);
+      teachTimer = setTimeout(function () { teaching = false; draw(); }, TEACH_MS);
+      hint.textContent = itemLabel() + ' — the pink ticks show what "evenly" means. shown once.';
+    } else {
       hint.textContent = progressHint();
-      updateTools();
-      draw();
-      return;
     }
-    scoreTicksItem();
+    updateTools();
+    draw();
   }
 
   function registerHatchStroke(pts) {
     if (pts.length < 2 || pathLength(pts) < HATCH_MIN_PATH) {
-      /* too short to be a hatch stroke — ignored, no penalty */
+      /* dropping this silently, and then scoring the gap it left, is the
+         exact "this feels unfair" failure — so it says what happened */
+      hint.textContent = itemLabel() + ' — that mark was too short to count. pull each stroke right across the box.';
       draw();
       return;
     }
@@ -649,8 +816,8 @@
   function scoreTicksItem() {
     var fracs = [], i;
     for (i = 0; i < ticks.length; i++) fracs.push(ticks[i].t);
-    var sc = tickScore(fracs, item.n);
     var segLen = Math.hypot(item.b.x - item.a.x, item.b.y - item.a.y);
+    var sc = tickScore(fracs, item.n, segLen, easeFactor());
     itemScores.push(sc);
     if (itemScores.length === ITEMS_PER_ROUND) reportRound();
     revealing = {
@@ -660,17 +827,15 @@
       offsets: tickOffsets(fracs, item.n, segLen)
     };
     hint.textContent = itemLabel() + ' — ' + Math.round(sc) +
-      '. pink ticks = perfect spacing; numbers = your offset in px.';
+      '. pink ticks = perfectly even spacing; the numbers are how far off each of yours landed, in px.';
     updateTools();
     draw();
     clearTimeout(revealTimer);
     revealTimer = setTimeout(nextItem, REVEAL_TICKS_MS);
   }
 
-  btnDone.addEventListener('click', function () {
-    if (!playing || revealing || !item || item.type !== 'hatch') return;
-    if (hatchStrokes.length < HATCH_MIN_STROKES) return;
-    var ev = hatchEval(hatchStrokes);
+  function scoreHatchItem() {
+    var ev = hatchEval(hatchStrokes, easeFactor());
     var ax = hatchAxes(item);
     itemScores.push(ev.score);
     if (itemScores.length === ITEMS_PER_ROUND) reportRound();
@@ -683,13 +848,33 @@
          free box: it follows the player's own mean direction */
       ghostDir: item.rotated ? ax.v : { x: Math.cos(ev.meanAng), y: Math.sin(ev.meanAng) }
     };
+    /* the numbers, then the same thing in words — a reveal that only
+       scores teaches nothing */
+    var words = '';
+    if (Math.abs(ev.drift) > 6) words = ev.drift > 0 ? ' your gaps widened as you went.' : ' your gaps tightened as you went.';
+    else if (ev.rhythm < 60) words = ' your gaps jumped about instead of holding one size.';
+    if (ev.parallelism < 60) words += ' your strokes fanned about ' + Math.round(ev.stdDeg) + '° apart in direction.';
     hint.textContent = itemLabel() + ' — ' + Math.round(ev.score) +
-      ' (parallel ' + Math.round(ev.parallelism) + ' · rhythm ' + Math.round(ev.rhythm) +
-      '). pink ghost = even hatch; numbers = your gaps.';
+      ' (parallel ' + Math.round(ev.parallelism) + ' · even gaps ' + Math.round(ev.rhythm) +
+      '). pink ghost = a perfectly even fill; the numbers are your own gaps.' + words;
     updateTools();
     draw();
     clearTimeout(revealTimer);
     revealTimer = setTimeout(nextItem, REVEAL_HATCH_MS);
+  }
+
+  /* Nothing commits itself. The ticks item used to score the instant the
+     n-th tick landed, which took the decision away from a player whose
+     own finger was covering the mark they had just made. */
+  btnDone.addEventListener('click', function () {
+    if (!playing || revealing || !item) return;
+    if (item.type === 'ticks') {
+      if (ticks.length < item.n) return;
+      scoreTicksItem();
+      return;
+    }
+    if (hatchStrokes.length < fillAsk().min) return;
+    scoreHatchItem();
   });
 
   btnUndo.addEventListener('click', function () {
@@ -759,12 +944,19 @@
   });
 
   ArtDaily.onTheme(draw);
+  ArtDaily.onInput(function () {
+    if (playing && !revealing && item) hint.textContent = progressHint();
+    updateTools();
+    draw();
+  });
+
   window.addEventListener('resize', function () {
     var prevW = W;
     fitCanvas();
     /* mobile URL-bar collapses fire resize without a width change —
        only rebuild (and clear in-progress marks) when width moved */
     if (W !== prevW && playing && !revealing) {
+      abortStroke();
       item = makeItem(itemIdx);
       resetItemMarks();
       hint.textContent = introHint();

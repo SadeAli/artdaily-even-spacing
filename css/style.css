@@ -39,7 +39,7 @@
   --hand: 'Caveat', 'Segoe Print', 'Comic Sans MS', cursive;
   --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
 
-  --game-accent: var(--bubblegum);
+  --game-accent: var(--bubblegum); /* TODO: pick this game's accent */
 }
 
 :root[data-theme="dark"] {
@@ -383,6 +383,20 @@ a { color: inherit; }
   }
 }
 
+/* The SDK fills this when it knows the input hardware. Scores are eased
+   per device, so the drill says which device it eased for. */
+.hud-input { min-width: 0; border: 0; background: none; padding: 5px 2px; display: flex; align-items: flex-end; }
+.hud-input dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  max-width: 8.5rem;
+  line-height: 1.25;
+}
+
 /* ============================================================
    game-specific styles below this line
    ============================================================ */
@@ -395,5 +409,46 @@ a { color: inherit; }
   gap: 10px;
   margin-top: 10px;
 }
+/* Canvas marks need their own accent ink on paper: --bubblegum #D077A0
+   sits at 2.95:1 against the card, short of AA for the marks this drill
+   actually *means* (the ideal ticks, the even-fill ghost, the direction
+   guide). This deeper pink is the same family at 5.23:1 — AA even for the
+   11px offset chips. Night studio keeps the pure accent, already 6.88:1.
+   Chrome accents (tape, buttons) stay --game-accent. */
+:root { --canvas-accent: #A8477A; }
+:root[data-theme="dark"] { --canvas-accent: var(--game-accent); }
+
 .stage-tools .btn,
 .game-controls .btn { min-height: 44px; min-width: 44px; }
+.stage-tools .btn,
+.game-controls .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---- tablet + phone gesture defences ----
+   A slow deliberate mark over a canvas is the iOS Safari long-press
+   gesture: the callout menu appears mid-stroke and the browser steals
+   the gesture with a pointercancel. touch-action does not suppress it,
+   and preventDefault on pointerdown does not cancel it. */
+.game-canvas {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.game-stage,
+.hud-stats,
+.game-hud { -webkit-user-select: none; user-select: none; }
+
+/* undo ↩ and done ✓ are tapped in quick succession all item long;
+   without this that is double-tap-to-zoom, and the new scale persists
+   into the next stroke. */
+.btn,
+.iconbtn,
+.backlink { touch-action: manipulation; }
+
+/* the canvas sits above the fold, so a downward drag begun on the hint
+   line or the HUD band pulls-to-refresh and destroys the round */
+html, body { overscroll-behavior-y: contain; }

@@ -43,6 +43,7 @@
           <div class="hud-stat"><dt>round</dt><dd id="hudRound">–</dd></div>
           <div class="hud-stat"><dt>score</dt><dd id="hudScore">–</dd></div>
           <div class="hud-stat"><dt>best</dt><dd id="hudBest">–</dd></div>
+                <div class="hud-stat hud-input"><dd id="inputMode" hidden></dd></div>
         </dl>
       </div>
 
@@ -53,7 +54,7 @@
         <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
         <div class="stage-tools">
           <button class="btn" id="btnUndo" disabled>undo <span aria-hidden="true">↩</span></button>
-          <button class="btn btn-primary" id="btnDone" disabled hidden>done <span aria-hidden="true">✓</span></button>
+          <button class="btn btn-primary" id="btnDone" disabled>done <span aria-hidden="true">✓</span></button>
         </div>
       </div>
 
@@ -63,9 +64,10 @@
       </div>
       <div class="howto" id="howTo" hidden>
         <p class="howto-cmd" aria-hidden="true"><span class="prompt">$</span> man even-spacing</p>
-        <p>Two lines, two boxes. Cross each line with short ticks that split it evenly; then hatch each box with 8–12 even parallel strokes and press done (the tilted box wants strokes parallel to its short edge).</p>
-        <p>Scoring is pure geometry: how close your ticks sit to the perfect split, how parallel your hatching stays and how steady its gaps are. Undo takes back your last mark.</p>
-        <p>Studio tip: rhythm comes from the arm, not the eye — set a beat and keep it.</p>
+        <p>Two lines, then two boxes. Cross each line with short ticks that split it into equal parts; then fill each box with evenly spaced parallel strokes — the dashed line inside the box shows the direction to run them, which on the tilted box is also the answer to “which edge is the short one”. Artists call this <strong>hatching</strong>.</p>
+        <p><strong>Nothing scores itself.</strong> Place your marks, look at them, undo ↩ anything you want to move, and press done ✓ when you are happy. Every mark is its own stroke, so lifting between them costs nothing — a trackpad is perfectly at home here.</p>
+        <p>Scoring is pure geometry: how close your ticks sit to the even split, how parallel your strokes stay, and how much the gaps between them wander. Tolerances are measured in pixels and never get stricter than a real hand can hit — and they widen for a mouse or a finger (the corner of the HUD says which the drill graded for). On a phone the box is bigger and asks for fewer strokes, so the gaps stay wider than the fingertip placing them.</p>
+        <p>Studio tip: even spacing comes from the arm, not the eye. Move the same distance each time and let the marks land where they land — counting a steady 1-2, 1-2 as you go works better than measuring each gap.</p>
       </div>
 
       <noscript><p class="hint">This drill needs JavaScript — nothing else, no trackers, no accounts.</p></noscript>
