@@ -815,10 +815,14 @@
 
   function drawHatchReveal(c, r) {
     drawHatchRect(c, r.item, true);
-    var ask = fillAsk();
     var i, g, m1, m2;
-    /* ideal evenly spaced ghost in accent */
-    var lines = ghostLines(r.item, r.ghostDir, Math.min(ask.hi, Math.max(ask.lo, r.strokes.length)));
+    /* ideal evenly spaced ghost in accent. The stroke count was fixed when the
+       item was scored — it must NOT be re-derived from fillAsk() here, which
+       reads the CURRENT canvas width: rotating a tablet mid-reveal redrew "a
+       perfectly even fill" with 7 lines for a fill the player made with 9,
+       while their own gap numbers, printed on the same picture and merely
+       rescaled, still described 9. The ghost and the numbers are one lesson. */
+    var lines = ghostLines(r.item, r.ghostDir, r.ghostN);
     ctx.save();
     ctx.globalAlpha = 0.85;
     ctx.strokeStyle = c.accent;
@@ -878,9 +882,17 @@
      Input — free strokes anywhere on the canvas, one pointer at a
      time, with a pen outranking a palm that landed first.
      ============================================================ */
-  function pointerPos(ev) {
-    var rect = canvas.getBoundingClientRect();
+  /* Split in two so a run of coalesced samples can share ONE canvas
+     measurement: getBoundingClientRect() forces a layout flush, and a fast
+     pen hands over dozens of samples per frame — all of them describing a
+     canvas that cannot have moved between them — in the same handler that
+     repaints. Measured here: 16 layout reads per pointermove instead of 1.
+     (This is the hazard ArtDaily.samples() is documented against.) */
+  function posIn(ev, rect) {
     return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+  }
+  function pointerPos(ev) {
+    return posIn(ev, canvas.getBoundingClientRect());
   }
 
   function penWins(ev) {
@@ -915,7 +927,16 @@
       return;
     }
     if (drawing) {
-      if (ev.pointerType === 'pen' && activeType !== 'pen') abortStroke();
+      /* This very pointer is down twice with no release in between, which the
+         pointer-events spec says cannot happen: its release was lost (press,
+         drag out of the embed frame, let go over the page). The old press is
+         over, so drop it. Without this the `else return` below swallowed the
+         new press while pointermove — which only checks `drawing` and the id,
+         both still matching — kept appending its samples to the ABANDONED
+         stroke: the two marks were welded into one tick (or one fill stroke)
+         and the item was graded on a mark the player never made. */
+      if (ev.pointerId === activePid) abortStroke();
+      else if (ev.pointerType === 'pen' && activeType !== 'pen') abortStroke();
       else return;
     }
     if (!penWins(ev)) return;
@@ -938,13 +959,11 @@
     if (!drawing || ev.pointerId !== activePid) return;
     ev.preventDefault();
     /* coalesced events: a fast fill stroke keeps every sample, and
-       fitDirection is only as good as the samples that survive */
-    var evs = ev.getCoalescedEvents ? ev.getCoalescedEvents() : null;
-    if (evs && evs.length) {
-      for (var i = 0; i < evs.length; i++) stroke.push(pointerPos(evs[i]));
-    } else {
-      stroke.push(pointerPos(ev));
-    }
+       fitDirection is only as good as the samples that survive. The canvas is
+       measured ONCE for the whole run — see posIn(). */
+    var rect = canvas.getBoundingClientRect();
+    var evs = ArtDaily.samples(ev);
+    for (var i = 0; i < evs.length; i++) stroke.push(posIn(evs[i], rect));
     draw();
   });
 
@@ -1094,6 +1113,7 @@
   function scoreHatchItem() {
     var ev = hatchEval(hatchStrokes, easeFactor());
     var ax = hatchAxes(item);
+    var ask = fillAsk();
     /* hatchEval grades the strokes against each other; fillFit grades them
        against the box they were asked to fill */
     var fit = fillFit(ev, item, easeFactor());
@@ -1107,7 +1127,10 @@
       ev: ev,
       /* tilted box: the ideal follows the asked-for short-edge axis;
          free box: it follows the player's own mean direction */
-      ghostDir: item.rotated ? ax.v : { x: Math.cos(ev.meanAng), y: Math.sin(ev.meanAng) }
+      ghostDir: item.rotated ? ax.v : { x: Math.cos(ev.meanAng), y: Math.sin(ev.meanAng) },
+      /* how many strokes "evenly spaced" meant for THIS attempt — frozen with
+         the rest of the reveal, so a resize cannot restate the lesson */
+      ghostN: Math.min(ask.hi, Math.max(ask.lo, hatchStrokes.length))
     };
     /* the numbers, then the same thing in words — a reveal that only
        scores teaches nothing */
