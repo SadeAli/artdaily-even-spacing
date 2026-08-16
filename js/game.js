@@ -155,10 +155,44 @@
     return fracs[fracs.length - 1] < fracs[0] ? gaps.slice().reverse() : gaps;
   }
 
-  /* The same delta the pink ticks show, in words. The hatch items have
-     said this since day one ("your gaps widened as you went"); the tick
-     items shipped a score and a row of ±px numbers and left the player to
-     spot the pattern themselves.
+  /* What shape a run of gaps has, once `tol` px of slop is allowed:
+     'even' | 'widened' | 'tightened' | 'jumpy'.
+
+     "widened as you went" is a claim about a TREND, so every step is
+     checked, not just the ends: 40, 150, 20, 190 ends far wider than it
+     starts and is nothing like a widening rhythm — it is gaps jumping
+     about. BOTH item families run through this one function, because
+     they used to disagree: the tick items called that exact gap list
+     "jumped about" and the fill items called it "widened as you went",
+     in the same drill, on the same numbers. */
+  function gapTrend(gaps, tol) {
+    if (!gaps || gaps.length < 2) return 'even';
+    var sd = stdev(gaps);
+    if (!isFinite(sd)) return 'even';
+    if (sd <= tol) return 'even';
+    var up = true, down = true, i, step;
+    for (i = 1; i < gaps.length; i++) {
+      step = gaps[i] - gaps[i - 1];
+      if (!isFinite(step)) return 'jumpy';
+      if (step < -tol) up = false;
+      if (step > tol) down = false;
+    }
+    var drift = gaps[gaps.length - 1] - gaps[0];
+    if (up && drift > 2 * tol) return 'widened';
+    if (down && drift < -2 * tol) return 'tightened';
+    return 'jumpy';
+  }
+
+  function trendSentence(t) {
+    if (t === 'widened') return 'your gaps widened as you went';
+    if (t === 'tightened') return 'your gaps tightened as you went';
+    if (t === 'jumpy') return 'your gaps jumped about instead of holding one size';
+    return 'your gaps were even';
+  }
+
+  /* The same delta the pink ticks show, in words. The tick items shipped a
+     score and a row of ±px numbers and left the player to spot the pattern
+     themselves.
 
      `errPx` and `freePx` are the very numbers tickScore is computed from,
      so the sentence can never contradict the number printed beside it:
@@ -167,24 +201,37 @@
   function tickWords(gaps, ease, errPx, freePx) {
     if (!gaps || gaps.length < 2) return '';
     var e = ease > 0 ? ease : 1;
-    var m = mean(gaps), sd = stdev(gaps);
-    if (!isFinite(m) || !isFinite(sd)) return '';
+    var m = mean(gaps);
+    if (!isFinite(m) || !isFinite(stdev(gaps))) return '';
     if (isFinite(errPx) && isFinite(freePx) && errPx <= freePx) return 'your gaps were even';
-    var tol = Math.max(0.06 * m, e * 3);
-    if (sd <= tol) return 'your gaps were even';
-    /* "widened as you went" is a claim about a TREND, so check every step,
-       not just the ends: 40, 150, 20, 190 ends far wider than it starts and
-       is nothing like a widening rhythm — it is gaps jumping about. */
-    var up = true, down = true, i, step;
-    for (i = 1; i < gaps.length; i++) {
-      step = gaps[i] - gaps[i - 1];
-      if (step < -tol) up = false;
-      if (step > tol) down = false;
-    }
-    var drift = gaps[gaps.length - 1] - gaps[0];
-    if (up && drift > 2 * tol) return 'your gaps widened as you went';
-    if (down && drift < -2 * tol) return 'your gaps tightened as you went';
-    return 'your gaps jumped about instead of holding one size';
+    return trendSentence(gapTrend(gaps, Math.max(0.06 * m, e * 3)));
+  }
+
+  /* The fill's delta in words, read off the same gap list the rhythm score
+     is computed from. Worst thing first, and it always says SOMETHING: a
+     fill whose gaps held one size used to get the numbers and silence,
+     which leaves the player guessing which half of the score was the good
+     half. */
+  function fillWords(ev, ease) {
+    if (!ev) return '';
+    var e = ease > 0 ? ease : 1;
+    /* No daylight between the strokes: they were redrawn on top of one
+       another, which is one mark, not a fill. That earns a flat 0 — and it
+       used to be explained as "your gaps jumped about", which describes a
+       fill the player did not draw. */
+    if (!ev.spread) return 'your strokes landed on top of each other — a fill needs daylight between them';
+    var gaps = ev.gaps || [];
+    if (gaps.length < 2) return '';
+    var m = mean(gaps);
+    if (!isFinite(m)) return '';
+    /* The slop the words allow is a fifth of the very band the rhythm
+       score dies at, so "your gaps held one size" is exactly the
+       statement "rhythm 80 or better" and the sentence can never
+       contradict the number printed beside it. A flat fraction of the
+       mean gap instead let a tight fill — mean gap near the hand's own
+       slop, where the pixel floor rules — be called even at rhythm 40. */
+    var t = gapTrend(gaps, 0.2 * Math.max(RHYTHM_REL_ZERO * m, e * RHYTHM_FLOOR_PX));
+    return t === 'even' ? 'your gaps held one size' : trendSentence(t);
   }
 
   /* --- segment geometry shared by tick registration --- */
@@ -315,6 +362,9 @@
       order: order,
       gaps: gaps,
       stdDeg: ax.stdDeg,
+      /* reported so the words can name the one failure the numbers cannot:
+         strokes with no daylight between them are one mark, not a fill */
+      spread: spread,
       drift: gaps.length > 1 ? gaps[gaps.length - 1] - gaps[0] : 0
     };
   }
@@ -432,6 +482,7 @@
   var drawing = false, stroke = [], activePid = null, activeType = null;
   var lastPenAt = -1e9;
   var revealing = null, revealTimer = null;
+  var holdingReveal = false;  /* a press is studying the reveal; release moves on */
   var teaching = false, teachTimer = null;
   var lastWords = '';  /* the last scored item, in words, for the round-done line */
 
@@ -542,6 +593,7 @@
     itemIdx = 0;
     itemScores = [];
     revealing = null;
+    holdingReveal = false;
     lastWords = '';
     playing = true;
     item = makeItem(0);
@@ -728,6 +780,7 @@
     for (i = 0; i < r.ticks.length; i++) drawPolyline(r.ticks[i].pts);
     ctx.restore();
     /* ideal ticks in accent + signed per-tick offsets */
+    var q, f;
     for (i = 0; i < r.offsets.length; i++) {
       off = r.offsets[i];
       p = { x: r.item.a.x + dxl * off.ideal, y: r.item.a.y + dyl * off.ideal };
@@ -737,6 +790,24 @@
       ctx.moveTo(p.x - nx * 12, p.y - ny * 12);
       ctx.lineTo(p.x + nx * 12, p.y + ny * 12);
       ctx.stroke();
+      /* The delta as a LENGTH, not only as a number: a bar on the far side
+         of the baseline running from where the tick belonged to where it
+         landed, capped by a dot on the player's own position. "+18" is a
+         figure a beginner has to convert into a distance on this very
+         sheet before it means anything; the bar is already that distance.
+         Drawn opposite the ±px chips so the two never overlap. */
+      f = off.ideal + (len > 0 ? off.deltaPx / len : 0);
+      q = { x: r.item.a.x + dxl * f, y: r.item.a.y + dyl * f };
+      ctx.strokeStyle = c.ink;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(p.x - nx * 19, p.y - ny * 19);
+      ctx.lineTo(q.x - nx * 19, q.y - ny * 19);
+      ctx.stroke();
+      ctx.fillStyle = c.ink;
+      ctx.beginPath();
+      ctx.arc(q.x - nx * 19, q.y - ny * 19, 3.5, 0, Math.PI * 2);
+      ctx.fill();
       txt = (off.deltaPx >= 0 ? '+' : '') + Math.round(off.deltaPx);
       chip(txt, p.x + nx * 27, p.y + ny * 27, c, c.ink);
     }
@@ -831,7 +902,18 @@
 
   canvas.addEventListener('pointerdown', function (ev) {
     if (ev.pointerType === 'pen') lastPenAt = ev.timeStamp || 0;
-    if (!playing || revealing || !item) return;
+    if (!playing || !item) return;
+    if (revealing) {
+      /* Press-and-hold studies the reveal for as long as you like; the
+         release moves on. This is the busiest reveal in the set — a pink
+         ghost, the player's own marks, a delta bar and a number per gap —
+         and it used to be shown for under two seconds with no way to
+         pause it. Same gesture as angle-snap's protractor arc. */
+      ev.preventDefault();
+      clearTimeout(revealTimer);
+      holdingReveal = true;
+      return;
+    }
     if (drawing) {
       if (ev.pointerType === 'pen' && activeType !== 'pen') abortStroke();
       else return;
@@ -880,14 +962,41 @@
     if (item.type === 'ticks') registerTick(pts);
     else registerHatchStroke(pts);
   }
-  canvas.addEventListener('pointerup', endStroke);
+  /* A release while the reveal is held moves on; otherwise it is a lift. */
+  function onPointerUp(ev) {
+    if (revealing && holdingReveal) {
+      holdingReveal = false;
+      clearTimeout(revealTimer);
+      nextItem();
+      return;
+    }
+    endStroke(ev);
+  }
+  canvas.addEventListener('pointerup', onPointerUp);
   /* fallback if pointer capture failed and the release lands off-canvas */
-  window.addEventListener('pointerup', endStroke);
+  window.addEventListener('pointerup', onPointerUp);
   /* iOS drops capture without a pointerup — treat it as the lift it is */
   canvas.addEventListener('lostpointercapture', endStroke);
 
+  /* End a press-and-hold that is never going to get its release, and start
+     the countdown over: the hold cancels the auto-advance, so a tab switch,
+     an OS notification or a context menu would otherwise strand the reveal
+     with nothing counting down and no way on but "new round". */
+  function releaseHold() {
+    if (!revealing || !holdingReveal) return;
+    holdingReveal = false;
+    clearTimeout(revealTimer);
+    if (playing) {
+      revealTimer = setTimeout(nextItem,
+        revealing.type === 'ticks' ? REVEAL_TICKS_MS : REVEAL_HATCH_MS);
+    }
+  }
+  window.addEventListener('blur', releaseHold);
+  window.addEventListener('contextmenu', releaseHold);
+
   function cancelStroke(ev) {
     /* interrupted stroke (system gesture etc.) — reset, no penalty */
+    if (revealing && holdingReveal) { releaseHold(); return; }
     if (!drawing || ev.pointerId !== activePid) return;
     abortStroke();
     if (playing && !revealing && item) hint.textContent = progressHint();
@@ -942,6 +1051,13 @@
   /* ============================================================
      Scoring a finished item → reveal → next.
      ============================================================ */
+  /* Named once so the two scorers cannot drift apart. The round's LAST
+     reveal stays on the sheet with nothing counting down, so offering to
+     hold it would be an instruction with nothing behind it. */
+  function holdCopy() {
+    return itemIdx + 1 < ITEMS_PER_ROUND ? ' hold to study, release for next.' : '';
+  }
+
   function scoreTicksItem() {
     var fracs = [], i;
     for (i = 0; i < ticks.length; i++) fracs.push(ticks[i].t);
@@ -960,9 +1076,15 @@
       tickErrorPx(fracs, item.n, segLen),
       tickTolerancePx(item.n, segLen, easeFactor()).free);
     lastWords = itemLabel() + ': ' + Math.round(sc) + (words ? ' — ' + words + '.' : '.');
+    /* The legend earns its length once. Repeating it on every item pushed
+       the delta — the only part that is about THIS attempt — past the fold
+       of a phone hint line, and a hint line that long shoves the canvas
+       down the page. Item 1 is the first tick item, so it carries it. */
     hint.textContent = itemLabel() + ' — ' + Math.round(sc) +
       (words ? '. ' + words + '.' : '.') +
-      ' pink ticks = perfectly even spacing; the numbers are how far off each of yours landed, in px.';
+      (itemIdx === 0
+        ? ' pink ticks = perfectly even; the bar beside each runs to where yours landed, and the number is that gap in px.'
+        : '') + holdCopy();
     updateTools();
     draw();
     clearTimeout(revealTimer);
@@ -989,21 +1111,28 @@
     };
     /* the numbers, then the same thing in words — a reveal that only
        scores teaches nothing */
-    var words = '';
-    if (Math.abs(ev.drift) > 6) words = ev.drift > 0 ? ' your gaps widened as you went.' : ' your gaps tightened as you went.';
-    else if (ev.rhythm < 60) words = ' your gaps jumped about instead of holding one size.';
-    if (ev.parallelism < 60) words += ' your strokes fanned about ' + Math.round(ev.stdDeg) + '° apart in direction.';
+    var fw = fillWords(ev, easeFactor());
+    var words = fw ? ' ' + fw + '.' : '';
+    /* parallelism is forced to 0 when the strokes had no daylight between
+       them, so "fanned 0° apart" would be an invented second complaint on
+       top of the one that actually cost the score */
+    if (ev.spread && ev.parallelism < 60) words += ' your strokes fanned about ' + Math.round(ev.stdDeg) + '° apart in direction.';
     /* a score cut by the box, not by the strokes, has to say so — a number
        that drops for a reason nobody names teaches nothing */
     if (fit.aligned < 0.98) words += ' your fill ran ' + Math.round(fit.offDeg) +
       '° off the dashed guide — the pink ghost shows the way it was asked for.';
     if (fit.spread < 0.9) words += ' it only crossed part of the box.';
     if (fit.inBox < 0.9) words += ' some strokes landed outside the box.';
-    lastWords = itemLabel() + ': ' + Math.round(score) +
-      (words ? ' —' + words : ' — the gaps held one size.');
+    lastWords = itemLabel() + ': ' + Math.round(score) + (words ? ' —' + words : '.');
+    /* words BEFORE the legend: the delta is the part about this attempt,
+       and it used to sit behind a sentence of chrome the player has
+       already read. Item 3 is the first fill item, so it carries the
+       legend and item 4 does not repeat it. */
     hint.textContent = itemLabel() + ' — ' + Math.round(score) +
-      ' (parallel ' + Math.round(ev.parallelism) + ' · even gaps ' + Math.round(ev.rhythm) +
-      '). pink ghost = a perfectly even fill; the numbers are your own gaps.' + words;
+      ' (parallel ' + Math.round(ev.parallelism) + ' · even gaps ' + Math.round(ev.rhythm) + ').' +
+      words +
+      (itemIdx === 2 ? ' pink ghost = a perfectly even fill; the numbers are your own gaps.' : '') +
+      holdCopy();
     updateTools();
     draw();
     clearTimeout(revealTimer);
@@ -1046,6 +1175,7 @@
       return;
     }
     revealing = null;
+    holdingReveal = false;
     itemIdx += 1;
     item = makeItem(itemIdx);
     resetItemMarks();
