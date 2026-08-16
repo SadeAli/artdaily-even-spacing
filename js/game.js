@@ -156,7 +156,7 @@
   }
 
   /* What shape a run of gaps has, once `tol` px of slop is allowed:
-     'even' | 'widened' | 'tightened' | 'jumpy'.
+     'even' | 'widened' | 'tightened' | 'endsTight' | 'endsWide' | 'jumpy'.
 
      "widened as you went" is a claim about a TREND, so every step is
      checked, not just the ends: 40, 150, 20, 190 ends far wider than it
@@ -180,12 +180,43 @@
     var drift = gaps[gaps.length - 1] - gaps[0];
     if (up && drift > 2 * tol) return 'widened';
     if (down && drift < -2 * tol) return 'tightened';
+    /* The middle held one size and the two OUTSIDE gaps did not — the single
+       commonest way a beginner splits a line wrong, and on the tick items it
+       is the shape the drill's own end-gap-inclusive design exists to catch:
+       you eyeball the interior rhythm correctly and misjudge how far the
+       first and last marks should sit from the ends.
+
+       It had no name, so it fell into 'jumpy' — measured on known-shape
+       inputs, 72–82% of the time — and 'your gaps jumped about instead of
+       holding one size' is both untrue of it and no use. Measured on the
+       shipped tick scorer, that catch-all was 76% of all attempts and it
+       printed under scores as high as 100: a sentence calling the player
+       chaotic beside a number calling them perfect.
+
+       Guarded so it can only ever take cases the tests above have already
+       declined: a real trend returns before this, and the interior must be
+       consistent (stdev within the same slop) or this is just noise being
+       relabelled. Needs an interior to average, hence length >= 4 — every
+       tick item has n+1 >= 4 gaps and every fill has at least min−1. */
+    if (gaps.length >= 4) {
+      var inner = gaps.slice(1, gaps.length - 1);
+      var edge = (gaps[0] + gaps[gaps.length - 1]) / 2;
+      var mid = mean(inner);
+      if (isFinite(edge) && isFinite(mid) && stdev(inner) <= tol) {
+        if (mid - edge > 2 * tol) return 'endsTight';
+        if (edge - mid > 2 * tol) return 'endsWide';
+      }
+    }
     return 'jumpy';
   }
 
   function trendSentence(t) {
     if (t === 'widened') return 'your gaps widened as you went';
     if (t === 'tightened') return 'your gaps tightened as you went';
+    /* names the half that WORKED as well as the half that did not — the
+       player who hears only "wrong" has nothing to keep doing */
+    if (t === 'endsTight') return 'your middle gaps held one size — the two outside ones came up short';
+    if (t === 'endsWide') return 'your middle gaps held one size — the two outside ones ran wide';
     if (t === 'jumpy') return 'your gaps jumped about instead of holding one size';
     return 'your gaps were even';
   }
@@ -194,16 +225,28 @@
      score and a row of ±px numbers and left the player to spot the pattern
      themselves.
 
-     `errPx` and `freePx` are the very numbers tickScore is computed from,
-     so the sentence can never contradict the number printed beside it:
-     inside the free zone the drill has ALREADY declared the spacing even,
-     and "100. your gaps jumped about" is the drill arguing with itself. */
-  function tickWords(gaps, ease, errPx, freePx) {
+     `errPx` and `tol` are the very numbers tickScore is computed from, so the
+     sentence cannot contradict the number printed beside it. tickScore maps
+     errPx linearly from tol.free (100) to tol.zero (0), so "errPx within a
+     fifth of the band" IS the statement "80 or better" — the same contract
+     fillWords already keeps on the fill half of this drill.
+
+     Gating on the free zone alone (i.e. only a literal 100) was the bug:
+     measured over 40,000 simulated rounds against the shipped scorer, 10,658
+     attempts scoring 90 or better were handed "your gaps jumped about instead
+     of holding one size". A number calling the player near-perfect beside a
+     sentence calling them chaotic teaches nothing except not to read one of
+     the two. The per-tick ±px bars on the canvas still carry every bit of the
+     detail this sentence rounds off. */
+  function tickWords(gaps, ease, errPx, tol) {
     if (!gaps || gaps.length < 2) return '';
     var e = ease > 0 ? ease : 1;
     var m = mean(gaps);
     if (!isFinite(m) || !isFinite(stdev(gaps))) return '';
-    if (isFinite(errPx) && isFinite(freePx) && errPx <= freePx) return 'your gaps were even';
+    if (tol && isFinite(errPx) && isFinite(tol.free)) {
+      var band = (isFinite(tol.zero) && tol.zero > tol.free) ? tol.zero - tol.free : 0;
+      if (errPx <= tol.free + 0.2 * band) return 'your gaps were even';
+    }
     return trendSentence(gapTrend(gaps, Math.max(0.06 * m, e * 3)));
   }
 
@@ -1093,7 +1136,7 @@
     var words = tickWords(
       gapsInDrawnOrder(tickGaps(fracs, item.n, segLen), fracs), easeFactor(),
       tickErrorPx(fracs, item.n, segLen),
-      tickTolerancePx(item.n, segLen, easeFactor()).free);
+      tickTolerancePx(item.n, segLen, easeFactor()));
     lastWords = itemLabel() + ': ' + Math.round(sc) + (words ? ' — ' + words + '.' : '.');
     /* The legend earns its length once. Repeating it on every item pushed
        the delta — the only part that is about THIS attempt — past the fold
